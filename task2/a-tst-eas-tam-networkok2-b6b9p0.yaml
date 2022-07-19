@@ -1,0 +1,241 @@
+---
+Parameters:
+  Ec2ImageId:
+    Type: String
+    Default: ami-0069d66985b09d219
+    Description: ami id for ec2
+  DbClass:
+    Description: Database instance class
+    Type: String
+    Default: db.t2.small
+    AllowedValues:
+      - db.t1.micro
+      - db.m1.small
+      - db.m1.medium
+      - db.m1.large
+      - db.m1.xlarge
+      - db.m2.xlarge
+      - db.m2.2xlarge
+      - db.m2.4xlarge
+      - db.m3.medium
+      - db.m3.large
+      - db.m3.xlarge
+      - db.m3.2xlarge
+      - db.m4.large
+      - db.m4.xlarge
+      - db.m4.2xlarge
+      - db.m4.4xlarge
+      - db.m4.10xlarge
+      - db.r3.large
+      - db.r3.xlarge
+      - db.r3.2xlarge
+      - db.r3.4xlarge
+      - db.r3.8xlarge
+      - db.m2.xlarge
+      - db.m2.2xlarge
+      - db.m2.4xlarge
+      - db.cr1.8xlarge
+      - db.t2.micro
+      - db.t2.small
+      - db.t2.medium
+      - db.t2.large
+    ConstraintDescription: must select a valid database instance type.
+  DbName:
+    Type: String
+    Default: "WebServerDatabase"
+  DbUsername:
+    Type: String
+    Default: "RootMaster"
+  DbPasswd:
+    Type: String
+    Default: "36e6cae8e5"
+  DbAllocatedStorage:
+    Default: '5'
+    Description: The size of the database (Gb)
+    Type: Number
+    MinValue: '5'
+    MaxValue: '1024'
+    ConstraintDescription: must be between 5 and 1024Gb.      
+#a-tst-vpc-tam-networkok-c1a2b6-{RESOURCE}
+Resources:
+  TargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Protocol: "HTTP"
+      Port: 80
+      VpcId: !ImportValue "a-tst-vpc-tam-networkok-c1a2b6-VPC"
+      HealthCheckPath: "/wordpress/wp-admin/install.php" 
+      HealthyThresholdCount: 5 #5 for http
+      UnhealthyThresholdCount: 2 #2 for http
+      HealthCheckIntervalSeconds: 25
+      HealthCheckTimeoutSeconds: 6 #6 for http
+      Matcher:
+        HttpCode: "302,200"
+
+  LoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Subnets: 
+        - !ImportValue "a-tst-vpc-tam-networkok-c1a2b6-PublicSubnet1"
+        - !ImportValue "a-tst-vpc-tam-networkok-c1a2b6-PublicSubnet2"
+      Type: "application"
+      SecurityGroups:
+        - !Ref LoadBalancerSecGroup
+
+  Listener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      DefaultActions:
+        - Type: "forward"
+          TargetGroupArn: !Ref TargetGroup
+      LoadBalancerArn: !Ref LoadBalancer
+      Port: 80
+      Protocol: "HTTP"
+
+  LoadBalancerSecGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: "Enable HTTP access via port 80"
+      SecurityGroupIngress:
+        - IpProtocol: "tcp"
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+      VpcId: !ImportValue "a-tst-vpc-tam-networkok-c1a2b6-VPC"
+
+  AsgSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: "Open port 80"
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: "80"
+          ToPort: "80"
+          SourceSecurityGroupId: !Ref LoadBalancerSecGroup
+
+        - IpProtocol: tcp
+          FromPort: "22"
+          ToPort: "22"
+          SourceSecurityGroupId: !ImportValue "a-tst-vpc-tam-networkok-c1a2b6-BastionSecGroup"
+      VpcId: !ImportValue "a-tst-vpc-tam-networkok-c1a2b6-VPC"
+
+  LaunchConfig:
+    Type: 'AWS::AutoScaling::LaunchConfiguration'
+    Properties:
+      ImageId: "ami-0069d66985b09d219"
+      InstanceType: "t3.micro"
+      SecurityGroups:
+        - !Ref AsgSecurityGroup
+      IamInstanceProfile: !ImportValue 'a-tst-vpc-tam-networkok-c1a2b6-IamSsmRoleInstance'
+      UserData:   
+        Fn::Base64: !Sub 
+          - |
+            #!/bin/bash
+            yum install -y amazon-efs-utils
+            amazon-linux-extras enable php7.3
+            yum update
+            yum -y install httpd
+            yum -y install php
+            yum -y install php-mysqlnd
+            yum -y install mod_ssl
+            curl -sL https://wordpress.org/latest.tar.gz -o /tmp/wordpress.tar.gz
+            tar -zxvf /tmp/wordpress.tar.gz -C /tmp/
+            rsync -av --delete /tmp/wordpress/ /var/www/html/
+            chown -R nobody:nobody /var/www/html/
+            cp /var/www/html/wp-config-sample.php /var/www/html/wp-config.php
+            chown -R apache:apache /var/www/html/wp-content
+            cd /var/www/html/
+            sed -i "s/'database_name_here'/'${DbName}'/g" wp-config.php
+            sed -i "s/'username_here'/'${DbUsername}'/g" wp-config.php
+            sed -i "s/'password_here'/'${DbPasswd}'/g" wp-config.php
+            sed -i "s/'localhost'/'${Task2RDSHost}'/g" wp-config.php
+            mount -t efs -o tls,accesspoint=${EfsAccessPoint} ${DbFileSystem}:/ /var/www/html/wp-content
+            chown -R apache:apache /var/www/html/wp-content
+            service httpd start
+          - Task2RDSHost : !GetAtt WebServerDb.Endpoint.Address
+  DbFileSystem:
+    Type: AWS::EFS::FileSystem
+    Properties: 
+      PerformanceMode: "generalPurpose"
+
+  EfsMountTarget:
+    Type: AWS::EFS::MountTarget
+    Properties:
+      FileSystemId: !Ref DbFileSystem
+      SecurityGroups:
+        - !Ref DbSecGroup
+      SubnetId: !ImportValue "a-tst-vpc-tam-networkok-c1a2b6-DatabaseSubnet1"
+
+  EfsAccessPoint:
+    Type: AWS::EFS::AccessPoint
+    Properties:
+      FileSystemId: !Ref DbFileSystem
+      RootDirectory: 
+        Path: "/wp-content"
+      PosixUser: 
+        Gid: 70
+        Uid: 70
+
+  WebServerAsg:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    Properties:
+      AutoScalingGroupName: "WebServerAsg"
+      LaunchConfigurationName: !Ref LaunchConfig
+      VPCZoneIdentifier:
+        - !ImportValue "a-tst-vpc-tam-networkok-c1a2b6-PrivateSubnet1"
+        - !ImportValue "a-tst-vpc-tam-networkok-c1a2b6-PrivateSubnet2"
+      MinSize: "1"
+      MaxSize: "5"
+      TargetGroupARNs: 
+        - !Ref TargetGroup  
+      DesiredCapacity: "2"
+    UpdatePolicy:
+      AutoScalingRollingUpdate:
+        MinInstancesInService: '1'
+        MaxBatchSize: '1'
+  
+  WebServerDb:
+    Type: AWS::RDS::DBInstance
+    Properties:
+      DBName: !Ref DbName
+      Engine: MySQL
+      MasterUsername: !Ref DbUsername
+      MasterUserPassword: !Ref DbPasswd
+      DBInstanceClass: !Ref DbClass
+      AllocatedStorage: !Ref DbAllocatedStorage
+      VPCSecurityGroups:
+        - !Ref DbSecGroup
+      DBSubnetGroupName: !Ref DbSubnetGroup
+      #MulitAZ
+  DbSecGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: open access to database
+      SecurityGroupIngress:
+        - IpProtocol: "tcp"
+          FromPort: 3306
+          ToPort: 3306
+          SourceSecurityGroupId: !GetAtt AsgSecurityGroup.GroupId
+      VpcId: !ImportValue "a-tst-vpc-tam-networkok-c1a2b6-VPC"
+
+  DbSubnetGroup:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupName: "DbSubnetGroup"
+      DBSubnetGroupDescription: subnet group for web server db
+      SubnetIds:
+        - !ImportValue "a-tst-vpc-tam-networkok-c1a2b6-DatabaseSubnet1"
+        - !ImportValue "a-tst-vpc-tam-networkok-c1a2b6-DatabaseSubnet2"
+
+Outputs:
+  WebsiteURL:
+    Value: !Join 
+      - ''
+      - - 'http://'
+        - !GetAtt 
+          - LoadBalancer
+          - DNSName
+    Description: WordPress Website 
+    
+
+
