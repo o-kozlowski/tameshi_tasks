@@ -16,3 +16,5 @@ The AWS stack contains:
     - UserData that installs Wordpress and configures it using RDS & EFS
 
 # Task 4 - Terraform (Unfinished)
+
+TEST
